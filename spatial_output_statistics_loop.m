@@ -1,6 +1,10 @@
 
 seeds = load("Data/seeds.mat").seeds;
 
+if ~isfolder("Results/")
+    mkdir("Results/")
+end
+
 for currRun=1:5
 
 rng(seeds(currRun));
@@ -332,7 +336,7 @@ for k=1:numCycles
 
     end
 
-    parfor i=1:numSims
+    for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end

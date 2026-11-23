@@ -3,6 +3,10 @@ increases = [4, 8, 10, 20, 30];
 
 seeds = load("Data/seeds.mat").seeds;
 
+if ~isfolder("Results/")
+    mkdir("Results/")
+end
+
 for currRun=1:5
 
 clearvars -except starts increases seeds currRun
