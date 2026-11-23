@@ -7,23 +7,22 @@ for currRun=1:5
 
 clearvars -except starts increases seeds currRun
 
-labels = load("shenData5.mat").labels;
-targets = load("shenData5.mat").targets;
+labels = load("Data/global_candidate_samples.mat").labels;
+targets = load("Data/global_candidate_samples.mat").targets;
 
 numData = size(labels, 1);
 
-load("Data\training_normalization.mat")
+labels_mean = mean(labels,1);
+
+labels_std = std(labels,[],1);
 
 normalized_labels = (labels - labels_mean) ./ labels_std;
-normalized_targets = (targets - targets_mean) ./ targets_std;
 
-% currSeed = 1234;
 rng(seeds(currRun))
-% rng(currSeed);
 fullShuf = randperm(size(targets, 1));
 
 shuffled_labels = normalized_labels(fullShuf,:);
-shuffled_targets = normalized_targets(fullShuf,:);
+shuffled_targets = targets(fullShuf,:);
 
 % currRun = 4;
 
@@ -31,7 +30,10 @@ start = starts(4);
 increase = increases(4);
 
 first_set_labels = shuffled_labels(1:start,:);
-first_set_targets = shuffled_targets(1:start, :);
+
+targetStats = struct();
+[targetStats.initial, first_set_targets] = normalizeTargets(shuffled_targets(1:start, :));
+
 
 % Network
 
@@ -98,16 +100,17 @@ variance = var(result,[],2);
 
 initial_ensemble_time = toc;
 
+%
 
-alTrainIdx = fullShuf(1:40);
-candidatePoolIdx = setdiff(1:numel(targets), alTrainIdx);
+alTrainIdx = fullShuf(1:start);
+candidatePoolIdx = setdiff(1:numData, alTrainIdx);
 [~, alCandidatePoolVarianceIdx] = sort(variance(candidatePoolIdx, :), "descend");
 alSelectedIdx = candidatePoolIdx(alCandidatePoolVarianceIdx(1:increase));
 
 alTrainIdx = [alTrainIdx alSelectedIdx];
 
 al_labels = normalized_labels(alTrainIdx, :);
-al_targets = normalized_targets(alTrainIdx, :);
+[targetStats.alTop(1), al_targets] = normalizeTargets(targets(alTrainIdx, :));
 
 numNets = 30;
 numCycles = 5;
@@ -116,10 +119,10 @@ numData = size(targets, 1);
 al_ensembles = cell(numCycles, numNets);
 al_variances = zeros(size(targets, 1),numCycles);
 
-
+%
 
 tic;
-for cycle=5:numCycles
+for cycle=1:numCycles
     
     disp(cycle)
 
@@ -150,14 +153,16 @@ for cycle=5:numCycles
     results = cell2mat(cellfun(@(net) predict(net, normalized_labels), al_ensembles(cycle, :), "UniformOutput",false));
     al_variances(:,cycle) = var(results,[],2);
 
-    candidatePoolIdx = setdiff(1:numel(targets), alTrainIdx);
-    [~, alCandidatePoolVarianceIdx] = sort(al_variances(candidatePoolIdx, cycle), "descend");
-    alSelectedIdx = candidatePoolIdx(alCandidatePoolVarianceIdx(1:increase));
-    
-    alTrainIdx = [alTrainIdx alSelectedIdx];
-    
-    al_labels = normalized_labels(alTrainIdx, :);
-    al_targets = normalized_targets(alTrainIdx, :);
+    if cycle < numCycles
+        candidatePoolIdx = setdiff(1:numData, alTrainIdx);
+        [~, alCandidatePoolVarianceIdx] = sort(al_variances(candidatePoolIdx, cycle), "descend");
+        alSelectedIdx = candidatePoolIdx(alCandidatePoolVarianceIdx(1:increase));
+        
+        alTrainIdx = [alTrainIdx alSelectedIdx];
+        
+        al_labels = normalized_labels(alTrainIdx, :);
+        [targetStats.alTop(cycle+1), al_targets] = normalizeTargets(targets(alTrainIdx, :));
+    end
 
 end
 
@@ -168,7 +173,7 @@ time1 = toc;
 % Hybrid approach
 
 combTrainIdx = fullShuf(1:start);
-candidatePoolIdx = setdiff(1:numel(targets), combTrainIdx);
+candidatePoolIdx = setdiff(1:numData, combTrainIdx);
 [~, combCandidatePoolVarianceIdx] = sort(variance(candidatePoolIdx, 1), "descend");
 
 topIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(1:increase/2));
@@ -183,7 +188,7 @@ equiIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(equiLocal));
 combTrainIdx = [combTrainIdx topIdx equiIdx];
 
 combinationLabels = normalized_labels(combTrainIdx, :);
-combinationTargets = normalized_targets(combTrainIdx, :);
+[targetStats.alHyb(1), combinationTargets] = normalizeTargets(targets(combTrainIdx, :));
 
 combination_ensembles = cell(numCycles, numNets);
 combination_variances = zeros(size(targets, 1),numCycles);
@@ -217,23 +222,25 @@ for cycle=1:numCycles
 
     results = cell2mat(cellfun(@(net) predict(net, normalized_labels), combination_ensembles(cycle, :), "UniformOutput",false));
     combination_variances(:,cycle) = var(results,[],2);
-
-    candidatePoolIdx = setdiff(1:numel(targets), combTrainIdx);
-    [~, combCandidatePoolVarianceIdx] = sort(combination_variances(candidatePoolIdx, cycle), "descend");
     
-    topIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(1:increase/2));
-    
-    sz = numel(candidatePoolIdx);
-    
-    equiLocal = linspace(increase/2 + 1, sz, increase/2);
-    equiLocal = floor(equiLocal);
-    
-    equiIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(equiLocal));
-    
-    combTrainIdx = [combTrainIdx topIdx equiIdx];
-    
-    combinationLabels = normalized_labels(combTrainIdx, :);
-    combinationTargets = normalized_targets(combTrainIdx, :);
+    if cycle < numCycles
+        candidatePoolIdx = setdiff(1:numData, combTrainIdx);
+        [~, combCandidatePoolVarianceIdx] = sort(combination_variances(candidatePoolIdx, cycle), "descend");
+        
+        topIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(1:increase/2));
+        
+        sz = numel(candidatePoolIdx);
+        
+        equiLocal = linspace(increase/2 + 1, sz, increase/2);
+        equiLocal = floor(equiLocal);
+        
+        equiIdx = candidatePoolIdx(combCandidatePoolVarianceIdx(equiLocal));
+        
+        combTrainIdx = [combTrainIdx topIdx equiIdx];
+        
+        combinationLabels = normalized_labels(combTrainIdx, :);
+        [targetStats.alHyb(cycle+1), combinationTargets] = normalizeTargets(targets(combTrainIdx, :));
+    end
 
 end
 
@@ -246,7 +253,7 @@ comparison_variances = zeros(size(targets, 1),numCycles);
 for cycle=1:numCycles
     
     comparisonLabels = shuffled_labels(1:start+cycle*increase, :);
-    comparisonTargets = shuffled_targets(1:start+cycle*increase, :);
+    [targetStats.random(cycle), comparisonTargets] = normalizeTargets(shuffled_targets(1:start+cycle*increase, :));
 
 
     for i=1:numNets
@@ -277,9 +284,5 @@ for cycle=1:numCycles
     comparison_variances(:,cycle) = var(results,[],2);
 
 end
-
-
-% close all;
-save(sprintf("Results/IV_AL_cycles_%d+5times%d_seed%d_shenData5.mat", starts(4), increases(4), seeds(currRun)));
-% 
-% end
+save(sprintf("Results/IV_AL_cycles_%d+5times%d_seed%d_shenData5_5nets.mat", start, increase, seeds(currRun)));
+end

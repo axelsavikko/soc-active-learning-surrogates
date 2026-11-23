@@ -6,72 +6,50 @@ for currRun=1:5
 rng(seeds(currRun));
 
 % Data load
-clear *
+clearvars -except starts increases seeds currRun
+
 labels = load("Data/spatial_candidate_samples.mat").labels;
 targets = load("Data/spatial_candidate_samples.mat").targets;
 
+nFeatures = size(labels, 2);
+
+targetStats = struct();
+
 load("Data/training_normalization_spatial.mat")
-
 normalized_labels = (labels - labels_mean) ./ labels_std;
-normalized_targets = (targets - targets_mean) ./ targets_std;
 
-% Data
+targets = targets(:,2);
 
-normalized_targets = normalized_targets(:,2);
-
-shuf = randperm(size(normalized_targets, 1));
-
-shuffled_labels = normalized_labels(shuf,:);
-shuffled_targets = normalized_targets(shuf,:);
-
-% Making first currSet as 3 random full simulations
-
-
-blockSize = 28*28;
-numBlocks = floor(length(normalized_targets) / blockSize);
+simBlockSize = 28*28;
+numSims = floor(length(targets) / simBlockSize);
 
 % Reshape into blocks (each column is a block)
-label_blocks = reshape(normalized_labels(1:numBlocks * blockSize, :), blockSize, numBlocks, []);
-target_blocks = reshape(normalized_targets(1:numBlocks * blockSize, :), blockSize, numBlocks, []);
+label_blocks = reshape(normalized_labels(1:numSims * simBlockSize, :), simBlockSize, numSims, []);
+target_blocks = reshape(targets(1:numSims * simBlockSize, :), simBlockSize, numSims, []);
 
 % Reshape unnormalized data into blocks (each column is a block)
-label_blocks2 = reshape(labels(1:numBlocks * blockSize, :), blockSize, numBlocks, []);
-target_blocks2 = reshape(targets(1:numBlocks * blockSize, :), blockSize, numBlocks, []);
-
-% label_blocks = label_blocks(:,1:2:end, :);
-% target_blocks = target_blocks(:, 1:2:end, :);
-
-numBlocks = size(label_blocks, 2);
+label_blocks2 = reshape(labels(1:numSims * simBlockSize, :), simBlockSize, numSims, []);
+target_blocks2 = reshape(targets(1:numSims * simBlockSize, :), simBlockSize, numSims, []);
 
 % Shuffle the blocks
-shuffledIndices = randperm(numBlocks);
-shuffledLabelBlocks = label_blocks(:,shuffledIndices, :);
-shuffledTargetBlocks = target_blocks(:,shuffledIndices, :);
+shuffledIndices = randperm(numSims);
 
-% Flatten back into a single array
-shuffled_labels = reshape(shuffledLabelBlocks, [], size(normalized_labels, 2), 1);
-shuffled_targets = reshape(shuffledTargetBlocks, [], size(normalized_targets, 2), 1);
-
+% Keep track of simulation IDs and select the blocks based on which simID
+% is included in the current run
+simIDs = 1:numSims;
+shuffled_simIDs = simIDs(shuffledIndices);
 
 % First set
 start = 40;
-oneSet = blockSize;
+oneSet = simBlockSize;
 
-first_set_labels = shuffled_labels(1:start*oneSet,:);
-first_set_targets = shuffled_targets(1:start*oneSet,:);
+first_set_sims = shuffled_simIDs(1:start);
 
-
+targetStats.initial = normalizeSpatialTargets(target_blocks(:,first_set_sims,:));
 
 % Comparison
 
 increase = 20;
-
-comparison_set_labels = shuffled_labels(1:start*oneSet+5*increase*oneSet, :);
-comparison_set_targets = shuffled_targets(1:start*oneSet+5*increase*oneSet, :);
-
-comparison_set_labels2 = shuffled_labels(1:start*oneSet+increase*2*oneSet, :);
-comparison_set_targets2 = shuffled_targets(1:start*oneSet+increase*2*oneSet, :);
-
 
 % Network architecture
 
@@ -101,9 +79,8 @@ mlpOptions.MaxEpochs = 1000;
 % Training loop
 tic
 
-
-
 numNets = 30;
+numCycles = 5;
 
 ensemble = cell(1, numNets);
 
@@ -111,20 +88,27 @@ ensemble = cell(1, numNets);
 for i=1:numNets
 
     fprintf("Base Ensemble, Net %d\n", i)
-    sz = size(first_set_targets, 1);
+    sz = numel(first_set_sims);
     shuf = randperm(sz);
     
-    curr_labels = first_set_labels(shuf,:);
-    curr_targets = first_set_targets(shuf,:);
+    shufIDs = first_set_sims(shuf);
+    mu = targetStats.initial.mu;
+    sigma = targetStats.initial.sigma;
 
     szTrain = floor(0.9*sz);
     szVal = floor(0.1*sz);
     
-    currTrainLabels = curr_labels(1:szTrain,:);
-    currTrainTargets = curr_targets(1:szTrain,:);
+    currTrainIDs = shufIDs(1:szTrain);
+    currValIDs = shufIDs(szTrain+1:end);
+    
+    currTrainLabels = reshape(label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+    currTrainTargets = (reshape(target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
+
+    currValLabels = reshape(label_blocks(:,currValIDs,:), [], nFeatures, 1);
+    currValTargets = (reshape(target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
     
     localOptions = mlpOptions;
-    localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+    localOptions.ValidationData = {currValLabels, currValTargets};
 
     trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
     ensemble{i} = trainedNet;
@@ -133,13 +117,13 @@ end
 first_net_time = toc;
 % Predicting for all labels with all networks:
 
-results = zeros(blockSize, numBlocks, numNets);
+results = zeros(simBlockSize, numSims, numNets);
 
-parfor i=1:numBlocks
+for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-    currSet = reshape(label_blocks(:,i,:), blockSize, 15);
+    currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
     results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), ensemble, "UniformOutput",false));
 end
 
@@ -151,56 +135,62 @@ variance = var(results, 0, 3);
 
 mean_variance = mean(variance, 1)';
 [sortedVars, sortedVarsIdx] = sort(mean_variance, "descend");
-plot(1:numBlocks, sortedVars)
+plot(1:numSims, sortedVars)
 
 % Choose 20 top variance
 
-[topVar, topVarIdx] = maxk(mean_variance, increase);
+alTrainSims = shuffled_simIDs(1:start);
+candidatePoolIDs = setdiff(1:numSims, alTrainSims);
+[~, alCandidatePoolVarianceIdx] = sort(mean_variance(candidatePoolIDs, :), "descend");
+alSelectedIdx = candidatePoolIDs(alCandidatePoolVarianceIdx(1:increase));
 
-second_set_labels = reshape(label_blocks(:,topVarIdx,:),[],15);
-second_set_targets = reshape(target_blocks(:,topVarIdx,:), [], 1);
+alTrainSims = [alTrainSims alSelectedIdx];
 
-curr_set_labels = [first_set_labels; second_set_labels];
-curr_set_targets = [first_set_targets; second_set_targets];
+targetStats.alTop(1) = normalizeSpatialTargets(target_blocks(:,alTrainSims,:));
 
-%
-cycles = 5;
 
-al_ensembles = cell(cycles, numNets);
-variances = zeros(blockSize, numBlocks, cycles);
-mean_variances = zeros(numBlocks,cycles);
-sortedVarsArr = zeros(numBlocks,cycles);
-sortedVarsIdxArr = zeros(numBlocks,cycles);
+al_ensembles = cell(numCycles, numNets);
+variances = zeros(simBlockSize, numSims, numCycles);
+mean_variances = zeros(numSims,numCycles);
+sortedVarsArr = zeros(numSims,numCycles);
+sortedVarsIdxArr = zeros(numSims,numCycles);
 
-for k=1:5    
+for k=1:numCycles    
     for i=1:numNets
 
         fprintf("AL, Cycle %d, Net %d", k, i)
         
-        sz = size(curr_set_targets, 1);
+        sz = numel(alTrainSims);
         shuf = randperm(sz);
         
-        curr_labels = curr_set_labels(shuf,:);
-        curr_targets = curr_set_targets(shuf,:);
+        shufIDs = alTrainSims(shuf);
+        mu = targetStats.alTop(k).mu;
+        sigma = targetStats.alTop(k).sigma;
     
         szTrain = floor(0.9*sz);
         szVal = floor(0.1*sz);
         
-        currTrainLabels = curr_labels(1:szTrain,:);
-        currTrainTargets = curr_targets(1:szTrain,:);
+        currTrainIDs = shufIDs(1:szTrain);
+        currValIDs = shufIDs(szTrain+1:end);
+        
+        currTrainLabels = reshape(label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+        currTrainTargets = (reshape(target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
+    
+        currValLabels = reshape(label_blocks(:,currValIDs,:), [], nFeatures, 1);
+        currValTargets = (reshape(target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
         
         localOptions = mlpOptions;
-        localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
-    
+        localOptions.ValidationData = {currValLabels, currValTargets};
+
         trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
         al_ensembles{k,i} = trainedNet;
     end
 
-    parfor i=1:numBlocks
+    for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-        currSet = reshape(label_blocks(:,i,:), blockSize, 15);
+        currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
         results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), al_ensembles(k,:), "UniformOutput",false));
     end
 
@@ -209,56 +199,144 @@ for k=1:5
     mean_variances(:,k) = mean(variances(:,:,k), 1);
 
     [sortedVarsArr(:,k), sortedVarsIdxArr(:,k)] = sort(mean_variances(:,k), "descend");
-
-    [topVar, topVarIdx] = maxk(mean_variances(:,k), increase);
     
-    curr_set_labels = [curr_set_labels; reshape(label_blocks(:,topVarIdx,:),[],15)];
-    curr_set_targets = [curr_set_targets; reshape(target_blocks(:,topVarIdx,:), [], 1)];
+    if k < numCycles
+    candidatePoolIDs = setdiff(1:numSims, alTrainSims);
+    [~, alCandidatePoolVarianceIdx] = sort(mean_variances(candidatePoolIDs, k), "descend");
+    alSelectedIdx = candidatePoolIDs(alCandidatePoolVarianceIdx(1:increase));
+    
+    alTrainSims = [alTrainSims alSelectedIdx];
+
+    targetStats.alTop(k+1) = normalizeSpatialTargets(target_blocks(:,alTrainSims,:));
+    end
 
 end
 
+% % Choose 20 points based on weighted variances
+% 
+% var_weights = load("var_weights_5.mat").var_weights_5;
+% var_weights = reshape(var_weights, 28*28, []);
+% 
+% weighted_variance = var_weights .* variance;
+% sum_weighted_variance = sum(weighted_variance, 1)';
+% 
+% [sortedWeightedSumVar, sortedWeightedSumVarIdx] = sort(sum_weighted_variance, "descend");
+% 
+% plot(1:1000, sortedWeightedSumVar)
+% 
+% 
+% [topVar, topVarIdx] = maxk(sum_weighted_variance, increase);
+% 
+% second_set_labels = reshape(label_blocks(:,topVarIdx,:),[],15);
+% second_set_targets = reshape(target_blocks(:,topVarIdx,:), [], 1);
+% 
+% curr_set_labels = [first_set_labels; second_set_labels];
+% curr_set_targets = [first_set_targets; second_set_targets];
+% 
+% % AL top with weighed variance
+% cycles = 5;
+% 
+% weighted_ensembles = cell(cycles, numNets);
+% variances = zeros(blockSize, numBlocks, cycles);
+% mean_variances = zeros(numBlocks,cycles);
+% sortedVarsArr = zeros(numBlocks,cycles);
+% sortedVarsIdxArr = zeros(numBlocks,cycles);
+% 
+% 
+% for k=1:5    
+%     for i=1:numNets
+% 
+%         fprintf("AL, Cycle %d, Net %d", k, i)
+% 
+%         sz = size(curr_set_targets, 1);
+%         shuf = randperm(sz);
+% 
+%         curr_labels = curr_set_labels(shuf,:);
+%         curr_targets = curr_set_targets(shuf,:);
+% 
+%         szTrain = floor(0.9*sz);
+%         szVal = floor(0.1*sz);
+% 
+%         currTrainLabels = curr_labels(1:szTrain,:);
+%         currTrainTargets = curr_targets(1:szTrain,:);
+% 
+%         localOptions = mlpOptions;
+%         localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+% 
+%         trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
+%         weighted_ensembles{k,i} = trainedNet;
+%     end
+% 
+%     parfor i=1:numBlocks
+%     if mod(i,50) == 0
+%         fprintf("Simulation %d\n", i)
+%     end
+%         currSet = reshape(label_blocks(:,i,:), blockSize, 15);
+%         results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), weighted_ensembles(k,:), "UniformOutput",false));
+%     end
+% 
+% 
+%     variances(:, :, k) = var(results, 0, 3);
+%     weighed_variances = var_weights .* variances(:,:,k);
+%     mean_variances(:,k) = sum(weighed_variances, 1)';
+% 
+%     [sortedVarsArr(:,k), sortedVarsIdxArr(:,k)] = sort(mean_variances(:,k), "descend");
+% 
+%     [topVar, topVarIdx] = maxk(mean_variances(:,k), increase);
+% 
+%     curr_set_labels = [curr_set_labels; reshape(label_blocks(:,topVarIdx,:),[],15)];
+%     curr_set_targets = [curr_set_targets; reshape(target_blocks(:,topVarIdx,:), [], 1)];
+% 
+% end
 
 %
 
-comp_ensembles = cell(cycles, numNets);
-comp_variances = zeros(blockSize, numBlocks, cycles);
-comp_mean_variances = zeros(numBlocks,cycles);
-compSortedVarsArr = zeros(numBlocks,cycles);
-compSortedVarsIdxArr = zeros(numBlocks,cycles);
+comp_ensembles = cell(numCycles, numNets);
+comp_variances = zeros(simBlockSize, numSims, numCycles);
+comp_mean_variances = zeros(numSims,numCycles);
+compSortedVarsArr = zeros(numSims,numCycles);
+compSortedVarsIdxArr = zeros(numSims,numCycles);
 
-compSetLabels = shuffled_labels(1:start*oneSet+increase*oneSet, :);
-compSetTargets = shuffled_targets(1:start*oneSet+increase*oneSet, :);
+compTrainSims = shuffled_simIDs(1:start+increase);
+targetStats.random(1) = normalizeSpatialTargets(target_blocks(:,compTrainSims, :));
 
-for k=1:5    
+for k=1:numCycles
     for i=1:numNets
 
     fprintf("Comparison, Cycle %d, Net %d", k, i)
     
-    sz = size(compSetLabels, 1);
-    shuf = randperm(sz);
+        sz = numel(compTrainSims);
+        shuf = randperm(sz);
+        
+        shufIDs = compTrainSims(shuf);
+        mu = targetStats.random(k).mu;
+        sigma = targetStats.random(k).sigma;
     
-    curr_labels = compSetLabels(shuf,:);
-    curr_targets = compSetTargets(shuf,:);
-
-    szTrain = floor(0.9*sz);
-    szVal = floor(0.1*sz);
+        szTrain = floor(0.9*sz);
+        szVal = floor(0.1*sz);
+        
+        currTrainIDs = shufIDs(1:szTrain);
+        currValIDs = shufIDs(szTrain+1:end);
+        
+        currTrainLabels = reshape(label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+        currTrainTargets = (reshape(target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
     
-    currTrainLabels = curr_labels(1:szTrain,:);
-    currTrainTargets = curr_targets(1:szTrain,:);
-    
-    localOptions = mlpOptions;
-    localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+        currValLabels = reshape(label_blocks(:,currValIDs,:), [], nFeatures, 1);
+        currValTargets = (reshape(target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
+        
+        localOptions = mlpOptions;
+        localOptions.ValidationData = {currValLabels, currValTargets};
 
     trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
     comp_ensembles{k,i} = trainedNet;
 
     end
 
-    parfor i=1:numBlocks
+    parfor i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-        currSet = reshape(label_blocks(:,i,:), blockSize, 15);
+        currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
         results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), comp_ensembles(k,:), "UniformOutput",false));
     end
 
@@ -267,61 +345,68 @@ for k=1:5
 
     [compSortedVarsArr(:,k), compSortedVarsIdxArr(:,k)] = sort(comp_mean_variances(:,k), "descend");
     
-    compSetLabels = shuffled_labels(1:start*oneSet+(k+1)*increase*oneSet, :);
-    compSetTargets = shuffled_targets(1:start*oneSet+(k+1)*increase*oneSet, :);
+    if k < numCycles
+        compTrainSims = shuffled_simIDs(1:(start + (k+1)*increase));
+        targetStats.random(k+1) = normalizeSpatialTargets(target_blocks(:,compTrainSims,:));
+    end
 
 end
 
-%
 
-notIncluded = normalized_labels(~ismember(normalized_labels, first_set_labels, "rows"));
-notIncluded = reshape(notIncluded, blockSize, [], 1);
-sz = size(notIncluded,2);
-equiIdxs = linspace((increase/2)+1,sz, increase/2);
-equiIdxs = floor(equiIdxs);
-equiIdxs = sortedVarsIdx(equiIdxs);
-
-combSetLabels = [first_set_labels ; reshape(label_blocks(:,sortedVarsIdx(1:increase/2),:), [], 15) ; reshape(label_blocks(:,equiIdxs,:), [], 15)];
-combSetTargets = [first_set_targets ;  reshape(target_blocks(:,sortedVarsIdx(1:increase/2),:), [], 1) ; reshape(target_blocks(:,equiIdxs,:), [], 1)];
 
 % Hybrid method
 
-comb_ensembles = cell(cycles, numNets);
-comb_variances = zeros(blockSize, numBlocks, cycles);
-comb_mean_variances = zeros(numBlocks,cycles);
-combSortedVarsArr = zeros(numBlocks,cycles);
-combSortedVarsIdxArr = zeros(numBlocks,cycles);
+combTrainSims = first_set_sims;
+chosenIDs = selectHybridSims(mean_variance, combTrainSims, increase);
 
-for k=1:5    
+combTrainSims = [combTrainSims chosenIDs];
+
+targetStats.alHyb(1) = normalizeSpatialTargets(target_blocks(:,combTrainSims, :));
+
+
+comb_ensembles = cell(numCycles, numNets);
+comb_variances = zeros(simBlockSize, numSims, numCycles);
+comb_mean_variances = zeros(numSims,numCycles);
+combSortedVarsArr = zeros(numSims,numCycles);
+combSortedVarsIdxArr = zeros(numSims,numCycles);
+
+for k=1:numCycles
     for i=1:numNets
 
     fprintf("Comparison, Cycle %d, Net %d", k, i)
     
-    sz = size(combSetLabels, 1);
+    sz = numel(combTrainSims);
     shuf = randperm(sz);
     
-    curr_labels = combSetLabels(shuf,:);
-    curr_targets = combSetTargets(shuf,:);
+    shufIDs = combTrainSims(shuf);
+    mu = targetStats.alHyb(k).mu;
+    sigma = targetStats.alHyb(k).sigma;
 
     szTrain = floor(0.9*sz);
     szVal = floor(0.1*sz);
     
-    currTrainLabels = curr_labels(1:szTrain,:);
-    currTrainTargets = curr_targets(1:szTrain,:);
+    currTrainIDs = shufIDs(1:szTrain);
+    currValIDs = shufIDs(szTrain+1:end);
+    
+    currTrainLabels = reshape(label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+    currTrainTargets = (reshape(target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
+
+    currValLabels = reshape(label_blocks(:,currValIDs,:), [], nFeatures, 1);
+    currValTargets = (reshape(target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
     
     localOptions = mlpOptions;
-    localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+    localOptions.ValidationData = {currValLabels, currValTargets};
 
     trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
     comb_ensembles{k,i} = trainedNet;
 
     end
 
-    parfor i=1:numBlocks
+    for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-        currSet = reshape(label_blocks(:,i,:), blockSize, 15);
+        currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
         results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), comb_ensembles(k,:), "UniformOutput",false));
     end
 
@@ -330,260 +415,286 @@ for k=1:5
 
     [combSortedVarsArr(:,k), combSortedVarsIdxArr(:,k)] = sort(comb_mean_variances(:,k), "descend");
     
-    notIncluded = normalized_labels(~ismember(normalized_labels, combSetLabels, "rows"));
-    notIncluded = reshape(notIncluded, blockSize, [], 1);
-    sz = size(notIncluded,2);
-    equiIdxs = linspace((increase/2)+1,sz, increase/2);
-    equiIdxs = floor(equiIdxs);
-    equiIdxs = combSortedVarsIdxArr(equiIdxs,k);
-    
-    combSetLabels = [combSetLabels ; reshape(label_blocks(:,combSortedVarsIdxArr(1:increase/2,k), :), [], 15) ; reshape(label_blocks(:,equiIdxs,:), [], 15)];
-    combSetTargets = [combSetTargets ;  reshape(target_blocks(:,combSortedVarsIdxArr(1:increase/2,k),:), [], 1) ; reshape(target_blocks(:,equiIdxs,:), [], 1)];
-
+    if k < numCycles
+        chosenIDs = selectHybridSims(comb_mean_variances(:,k), combTrainSims, increase);
+        combTrainSims = [combTrainSims chosenIDs];
+        targetStats.alHyb(k+1) = normalizeSpatialTargets(target_blocks(:,combTrainSims,:));
+    end
 end
 
 
 close all;
-save(sprintf("shen_temp_%d+5times%d_seed%d.mat", start, increase, seeds(currRun)))
+% close all;
+save(sprintf("Results/shen_temp_%d+5times%d_seed%d.mat", start, increase, seeds(currRun)));
 end
 
+%% Special case for weighted variance
 
+% Predict using the shared initial ensemble.
 
-%% Special case for weighted variance and QBC
+weighted_results = zeros(simBlockSize, numSims, numNets);
 
-numNets = 30;
-
-ensemble = cell(1, numNets);
-
-for i=1:numNets
-
-    fprintf("Base Ensemble, Net %d\n", i)
-    sz = size(first_set_targets, 1);
-    shuf = randperm(sz);
-    
-    curr_labels = first_set_labels(shuf,:);
-    curr_targets = first_set_targets(shuf,:);
-
-    szTrain = floor(0.9*sz);
-    szVal = floor(0.1*sz);
-    
-    currTrainLabels = curr_labels(1:szTrain,:);
-    currTrainTargets = curr_targets(1:szTrain,:);
-    
-    localOptions = mlpOptions;
-    localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
-
-    trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
-    ensemble{i} = trainedNet;
-
-end
-
-% Predicting for all labels with all networks:
-
-results = zeros(blockSize, numBlocks, numNets);
-
-for i=1:numBlocks
+for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-    currSet = reshape(label_blocks(:,i,:), blockSize, 15);
-    results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), ensemble, "UniformOutput",false));
+
+    currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
+
+    weighted_results(:,i,:) = reshape(cell2mat(cellfun( ...
+        @(net) predict(net,currSet), ensemble, ...
+        "UniformOutput",false)), simBlockSize, 1, numNets);
 end
 
-variance = var(results, 0, 3);
+weighted_initial_variance = var(weighted_results, 0, 3);
 
-% Choose 20 points based on weighted variances
+% Fixed weights from all initially acquired temperature fields.
+% Compute the initial ensemble's residuals in kelvin.
 
-var_weights = load("Data/var_weights_5.mat").var_weights_5;
-var_weights = reshape(var_weights, 28*28, []);
+weighted_initial_predicted = ...
+    mean(weighted_results(:,first_set_sims,:), 3) ...
+    .* targetStats.initial.sigma + targetStats.initial.mu;
 
-weighted_variance = var_weights .* variance;
+var_weights = mean(abs(weighted_initial_predicted ...
+    - target_blocks(:,first_set_sims,:)), 2);
+
+if max(var_weights) == 0
+    var_weights = ones(simBlockSize, 1);
+else
+    var_weights = var_weights ./ max(var_weights);
+end
+
+weightSourceIDs = first_set_sims;
+
+weighted_variance = var_weights .* weighted_initial_variance;
 sum_weighted_variance = sum(weighted_variance, 1)';
 
-[sortedWeightedSumVar, sortedWeightedSumVarIdx] = sort(sum_weighted_variance, "descend");
+[sortedWeightedSumVar, sortedWeightedSumVarIdx] = ...
+    sort(sum_weighted_variance, "descend");
 
-plot(1:1000, sortedWeightedSumVar)
+figure;
+plot(1:numSims, sortedWeightedSumVar)
+
+% Choose the first batch, excluding initially acquired simulations.
+
+weightedTrainSims = first_set_sims(:).';
+
+candidatePoolIDs = setdiff(1:numSims, weightedTrainSims);
+[topVar, topVarIdx] = maxk( ...
+    sum_weighted_variance(candidatePoolIDs), increase);
+
+topVarIdx = candidatePoolIDs(topVarIdx);
+weightedTrainSims = [weightedTrainSims topVarIdx(:).'];
+
+targetStats.weighted(1) = ...
+    normalizeSpatialTargets(target_blocks(:,weightedTrainSims,:));
+
+weighted_ensembles = cell(numCycles, numNets);
+weighted_variances = zeros(simBlockSize, numSims, numCycles);
+weighted_mean_variances = zeros(numSims,numCycles);
+weighted_sortedVarsArr = zeros(numSims,numCycles);
+weighted_sortedVarsIdxArr = zeros(numSims,numCycles);
+
+weightedHistory = cell(numCycles+1,1);
+weightedHistory{1} = first_set_sims(:).';
 
 
-[topVar, topVarIdx] = maxk(sum_weighted_variance, increase);
 
-second_set_labels = reshape(label_blocks(:,topVarIdx,:),[],15);
-second_set_targets = reshape(target_blocks(:,topVarIdx,:), [], 1);
+for k=1:numCycles
 
-curr_set_labels = [first_set_labels; second_set_labels];
-curr_set_targets = [first_set_targets; second_set_targets];
+    assert(numel(unique(weightedTrainSims)) == start + k*increase, ...
+        "Incorrect weighted acquisition budget.");
 
-% AL top with weighed variance
-cycles = 5;
+    weightedHistory{k+1} = weightedTrainSims;
 
-weighted_ensembles = cell(cycles, numNets);
-variances = zeros(blockSize, numBlocks, cycles);
-mean_variances = zeros(numBlocks,cycles);
-sortedVarsArr = zeros(numBlocks,cycles);
-sortedVarsIdxArr = zeros(numBlocks,cycles);
-
-
-for k=1:5    
     for i=1:numNets
 
-        fprintf("AL, Cycle %d, Net %d", k, i)
+        fprintf("Weighted, Cycle %d, Net %d\n", k, i)
 
-        sz = size(curr_set_targets, 1);
+        sz = numel(weightedTrainSims);
         shuf = randperm(sz);
 
-        curr_labels = curr_set_labels(shuf,:);
-        curr_targets = curr_set_targets(shuf,:);
+        shufIDs = weightedTrainSims(shuf);
+        mu = targetStats.weighted(k).mu;
+        sigma = targetStats.weighted(k).sigma;
 
         szTrain = floor(0.9*sz);
-        szVal = floor(0.1*sz);
 
-        currTrainLabels = curr_labels(1:szTrain,:);
-        currTrainTargets = curr_targets(1:szTrain,:);
+        currTrainIDs = shufIDs(1:szTrain);
+        currValIDs = shufIDs(szTrain+1:end);
+
+        currTrainLabels = reshape( ...
+            label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+
+        currTrainTargets = (reshape( ...
+            target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
+
+        currValLabels = reshape( ...
+            label_blocks(:,currValIDs,:), [], nFeatures, 1);
+
+        currValTargets = (reshape( ...
+            target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
 
         localOptions = mlpOptions;
-        localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+        localOptions.ValidationData = ...
+            {currValLabels, currValTargets};
 
-        trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
+        trainedNet = trainnet(currTrainLabels, currTrainTargets, ...
+            mlpLayers,"mae",localOptions);
+
         weighted_ensembles{k,i} = trainedNet;
     end
 
-    for i=1:numBlocks
+    for i=1:numSims
+        if mod(i,50) == 0
+            fprintf("Simulation %d\n", i)
+        end
+
+        currSet = reshape(label_blocks(:,i,:), ...
+            simBlockSize, nFeatures);
+
+        weighted_results(:,i,:) = reshape(cell2mat(cellfun( ...
+            @(net) predict(net,currSet), weighted_ensembles(k,:), ...
+            "UniformOutput",false)), simBlockSize, 1, numNets);
+    end
+
+    weighted_variances(:,:,k) = var(weighted_results, 0, 3);
+
+    weighed_variances = var_weights .* weighted_variances(:,:,k);
+    weighted_mean_variances(:,k) = sum(weighed_variances, 1)';
+
+    [weighted_sortedVarsArr(:,k), weighted_sortedVarsIdxArr(:,k)] = ...
+        sort(weighted_mean_variances(:,k), "descend");
+
+    if k < numCycles
+
+        candidatePoolIDs = setdiff(1:numSims, weightedTrainSims);
+
+        [topVar, topVarIdx] = maxk( ...
+            weighted_mean_variances(candidatePoolIDs,k), increase);
+
+        topVarIdx = candidatePoolIDs(topVarIdx);
+        weightedTrainSims = [weightedTrainSims topVarIdx(:).'];
+
+        targetStats.weighted(k+1) = normalizeSpatialTargets(target_blocks(:,weightedTrainSims,:));
+    end
+end
+
+
+%% QBC: 99th percentile of pointwise ensemble range
+
+% Predict using the same shared initial ensemble.
+
+qbc_results = zeros(simBlockSize, numSims, numNets);
+
+for i=1:numSims
     if mod(i,50) == 0
         fprintf("Simulation %d\n", i)
     end
-        currSet = reshape(label_blocks(:,i,:), blockSize, 15);
-        results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), weighted_ensembles(k,:), "UniformOutput",false));
-    end
 
+    currSet = reshape(label_blocks(:,i,:), simBlockSize, nFeatures);
 
-    variances(:, :, k) = var(results, 0, 3);
-    weighed_variances = var_weights .* variances(:,:,k);
-    mean_variances(:,k) = sum(weighed_variances, 1)';
-
-    [sortedVarsArr(:,k), sortedVarsIdxArr(:,k)] = sort(mean_variances(:,k), "descend");
-
-    [topVar, topVarIdx] = maxk(mean_variances(:,k), increase);
-
-    curr_set_labels = [curr_set_labels; reshape(label_blocks(:,topVarIdx,:),[],15)];
-    curr_set_targets = [curr_set_targets; reshape(target_blocks(:,topVarIdx,:), [], 1)];
-
+    qbc_results(:,i,:) = reshape(cell2mat(cellfun( ...
+        @(net) predict(net,currSet), ensemble, ...
+        "UniformOutput",false)), simBlockSize, 1, numNets);
 end
 
 
-%% QBC
+maxDiff = max(qbc_results, [], 3) - min(qbc_results, [], 3);
+maxDiff99 = prctile(maxDiff,99,1)';
 
+[qbc_sortedVars, qbc_sortedVarsIdx] = sort(maxDiff99, "descend");
 
-numNets = 30;
+figure;
+plot(1:numSims, qbc_sortedVars)
 
-ensemble = cell(1, numNets);
+% Choose the first batch, excluding initially acquired simulations.
 
-for i=1:numNets
+qbcTrainSims = first_set_sims(:).';
 
-    fprintf("Base Ensemble, Net %d\n", i)
-    sz = size(first_set_targets, 1);
-    shuf = randperm(sz);
-    
-    curr_labels = first_set_labels(shuf,:);
-    curr_targets = first_set_targets(shuf,:);
+candidatePoolIDs = setdiff(1:numSims, qbcTrainSims);
+[topVar, topVarIdx] = maxk(maxDiff99(candidatePoolIDs), increase);
 
-    szTrain = floor(0.9*sz);
-    szVal = floor(0.1*sz);
-    
-    currTrainLabels = curr_labels(1:szTrain,:);
-    currTrainTargets = curr_targets(1:szTrain,:);
-    
-    localOptions = mlpOptions;
-    localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
+topVarIdx = candidatePoolIDs(topVarIdx);
+qbcTrainSims = [qbcTrainSims topVarIdx(:).'];
 
-    trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
-    ensemble{i} = trainedNet;
+targetStats.qbc(1) = normalizeSpatialTargets(target_blocks(:,qbcTrainSims,:));
 
-end
+qbc_ensembles = cell(numCycles, numNets);
+maxDiff = zeros(simBlockSize, numSims, numCycles);
+maxDiff99 = zeros(numSims,numCycles);
+qbc_sortedVarsArr2 = zeros(numSims,numCycles);
+qbc_sortedVarsIdxArr2 = zeros(numSims,numCycles);
 
-% Predicting for all labels with all networks:
+qbcHistory = cell(numCycles+1,1);
+qbcHistory{1} = first_set_sims(:).';
 
-results = zeros(blockSize, numBlocks, numNets);
+for k=1:numCycles
 
-for i=1:numBlocks
-    if mod(i,50) == 0
-        fprintf("Simulation %d\n", i)
-    end
-    currSet = reshape(label_blocks(:,i,:), blockSize, 15);
-    results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), ensemble, "UniformOutput",false));
-end
+    assert(numel(unique(qbcTrainSims)) == start + k*increase, ...
+        "Incorrect QBC acquisition budget.");
 
-variance = var(results, 0, 3);
-%%
-maxDiff = max(results, [], 3) - min(results, [], 3);
-maxDiff95 = prctile(maxDiff ,99, 1);
-maxDiff95mean = mean(maxDiff95, 2);
+    qbcHistory{k+1} = qbcTrainSims;
 
-[sortedVars, sortedVarsIdx] = sort(maxDiff95, "descend");
-plot(1:numBlocks, sortedVars)
-
-
-% Choose 20 top variance
-
-[topVar, topVarIdx] = maxk(maxDiff95, increase);
-
-second_set_labels = reshape(label_blocks(:,topVarIdx,:),[],15);
-second_set_targets = reshape(target_blocks(:,topVarIdx,:), [], 1);
-
-curr_set_labels = [first_set_labels; second_set_labels];
-curr_set_targets = [first_set_targets; second_set_targets];
-
-%
-cycles = 5;
-
-al_ensembles = cell(cycles, numNets);
-maxDiff = zeros(blockSize, numBlocks, cycles);
-maxDiff95 = zeros(numBlocks,cycles);
-sortedVarsArr = zeros(numBlocks,cycles);
-sortedVarsIdxArr = zeros(numBlocks,cycles);
-
-
-
-for k=1:cycles    
     for i=1:numNets
 
-        fprintf("AL, Cycle %d, Net %d", k, i)
-        
-        sz = size(curr_set_targets, 1);
+        fprintf("QBC, Cycle %d, Net %d\n", k, i)
+
+        sz = numel(qbcTrainSims);
         shuf = randperm(sz);
-        
-        curr_labels = curr_set_labels(shuf,:);
-        curr_targets = curr_set_targets(shuf,:);
-    
+
+        shufIDs = qbcTrainSims(shuf);
+        mu = targetStats.qbc(k).mu;
+        sigma = targetStats.qbc(k).sigma;
+
         szTrain = floor(0.9*sz);
-        szVal = floor(0.1*sz);
-        
-        currTrainLabels = curr_labels(1:szTrain,:);
-        currTrainTargets = curr_targets(1:szTrain,:);
-        
+
+        currTrainIDs = shufIDs(1:szTrain);
+        currValIDs = shufIDs(szTrain+1:end);
+
+        currTrainLabels = reshape(label_blocks(:,currTrainIDs,:), [], nFeatures, 1);
+        currTrainTargets = (reshape(target_blocks(:,currTrainIDs,:), [], 1) - mu) ./ sigma;
+
+        currValLabels = reshape(label_blocks(:,currValIDs,:), [], nFeatures, 1);
+        currValTargets = (reshape(target_blocks(:,currValIDs,:), [], 1) - mu) ./ sigma;
+
         localOptions = mlpOptions;
-        localOptions.ValidationData = {curr_labels(szTrain+1:end,:), curr_targets(szTrain+1:end,:)};
-    
-        trainedNet = trainnet(currTrainLabels, currTrainTargets, mlpLayers,"mae", localOptions);
-        al_ensembles{k,i} = trainedNet;
+        localOptions.ValidationData = ...
+            {currValLabels, currValTargets};
+
+        trainedNet = trainnet(currTrainLabels, currTrainTargets,mlpLayers,"mae",localOptions);
+
+        qbc_ensembles{k,i} = trainedNet;
     end
 
-    for i=1:numBlocks
-    if mod(i,50) == 0
-        fprintf("Simulation %d\n", i)
+    for i=1:numSims
+        if mod(i,50) == 0
+            fprintf("Simulation %d\n", i)
+        end
+
+        currSet = reshape(label_blocks(:,i,:),simBlockSize, nFeatures);
+
+        qbc_results(:,i,:) = reshape(cell2mat(cellfun(@(net) predict(net,currSet), qbc_ensembles(k,:),"UniformOutput",false)), simBlockSize, 1, numNets);
     end
-        currSet = reshape(label_blocks(:,i,:), blockSize, 15);
-        results(:,i,:) = cell2mat(cellfun(@(net) predict(net,currSet), al_ensembles(k,:), "UniformOutput",false));
+
+    maxDiff(:,:,k) = max(qbc_results, [], 3) - min(qbc_results, [], 3);
+
+    maxDiff99(:,k) = prctile(maxDiff(:,:,k),99,1)';
+
+    [qbc_sortedVarsArr2(:,k), qbc_sortedVarsIdxArr2(:,k)] = sort(maxDiff99(:,k), "descend");
+
+    if k < numCycles
+
+        candidatePoolIDs = setdiff(1:numSims, qbcTrainSims);
+
+        [topVar, topVarIdx] = maxk(maxDiff99(candidatePoolIDs,k), increase);
+
+        topVarIdx = candidatePoolIDs(topVarIdx);
+        qbcTrainSims = [qbcTrainSims topVarIdx(:).'];
+
+        targetStats.qbc(k+1) = normalizeSpatialTargets(target_blocks(:,qbcTrainSims,:));
     end
-
-
-    maxDiff(:, :, k) = max(results, [], 3) - min(results, [], 3);
-    maxDiff95(:,k) = prctile(maxDiff(:,:,k),99, 1);
-
-    [sortedVarsArr2(:,k), sortedVarsIdxArr2(:,k)] = sort(maxDiff95(:,k), "descend");
-
-    [topVar, topVarIdx] = maxk(maxDiff95(:,k), increase);
-    
-    curr_set_labels = [curr_set_labels; reshape(label_blocks(:,topVarIdx,:),[],15)];
-    curr_set_targets = [curr_set_targets; reshape(target_blocks(:,topVarIdx,:), [], 1)];
-
 end
+
+save("Results/qbc_ensembles.mat", "qbc_ensembles", "targetStats")
+save("Results/weighted_ensembles.mat", "weighted_ensembles", "targetStats")
