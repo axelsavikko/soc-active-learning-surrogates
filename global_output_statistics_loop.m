@@ -288,5 +288,5 @@ for cycle=1:numCycles
     comparison_variances(:,cycle) = var(results,[],2);
 
 end
-save(sprintf("Results/IV_AL_cycles_%d+5times%d_seed%d_shenData5_5nets.mat", start, increase, seeds(currRun)));
+save(sprintf("Results/IV_AL_cycles_%d+5times%d_seed%d_shenData5.mat", start, increase, seeds(currRun)));
 end
